@@ -37,6 +37,9 @@ def main() -> int:
     parser.add_argument("--filename", default=None)
     parser.add_argument("--required-field", action="append", default=None)
     parser.add_argument("--include-field", action="append", default=None)
+    parser.add_argument("--mode", choices=["folder_structure", "pdf"], default=None)
+    parser.add_argument("--skip-bom", action="store_true")
+    parser.add_argument("--skip-output-jobs", action="store_true")
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--timeout-seconds", type=float, default=30)
     args = parser.parse_args()
@@ -81,6 +84,12 @@ def main() -> int:
             tool_arguments["required_fields"] = args.required_field
         if args.include_field is not None:
             tool_arguments["include_fields"] = args.include_field
+        if args.mode is not None:
+            tool_arguments["mode"] = args.mode
+        if args.skip_bom:
+            tool_arguments["include_bom"] = False
+        if args.skip_output_jobs:
+            tool_arguments["include_output_jobs"] = False
         if args.confirm:
             tool_arguments["confirm"] = True
 

@@ -66,6 +66,11 @@ def main() -> int:
         assert "altium_ping" in tool_names
         assert "altium_find_output_jobs" in tool_names
         assert "altium_prepare_output_generation" in tool_names
+        assert "altium_project_health_check" in tool_names
+        assert "altium_export_project_health_report" in tool_names
+        assert "altium_run_project_validation" in tool_names
+        assert "altium_open_pcb_drc_dialog" in tool_names
+        assert "altium_run_active_output_container" in tool_names
         assert "altium_list_pcb_nets" in tool_names
         assert "altium_check_pcb_nets" in tool_names
         assert "altium_export_pcb_net_report" in tool_names

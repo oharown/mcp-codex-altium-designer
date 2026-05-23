@@ -95,6 +95,11 @@ C:\path\to\mcp-codex-altium-designer\shared\response.json
 - `altium_export_component_field_report`: 将字段/参数检查报告导出为 `exports/` 目录下的 CSV 或 JSON 文件。
 - `altium_update_schematic_parameters`: 按位号和参数名更新已有原理图参数；必须 `confirm=true`，不会自动创建缺失参数或自动保存工程。
 - `altium_prepare_output_generation`: 检查 OutJob 是否就绪并生成生产输出前置计划，不运行输出。
+- `altium_project_health_check`: 运行只读项目健康检查，组合位号、SCH/PCB 对比、字段、PCB 网络、BOM 预览和 OutJob 就绪度。
+- `altium_export_project_health_report`: 将项目健康检查报告导出为 CSV 或 JSON。
+- `altium_run_project_validation`: 触发 Altium 项目验证/ERC；必须 `confirm=true`。
+- `altium_open_pcb_drc_dialog`: 打开 PCB DRC 对话框；必须 `confirm=true`，不自动点击运行。
+- `altium_run_active_output_container`: 对当前 OutJob 中选中的输出容器生成输出；必须 `confirm=true`。
 - `altium_stop_bridge`: 创建停止文件，让运行中的 bridge 尽快退出。
 
 ## 本地测试
@@ -243,6 +248,16 @@ python scripts\mcp_call_tool.py altium_update_schematic_parameters --arguments-j
 
 ```powershell
 python scripts\mcp_call_tool.py altium_prepare_output_generation --timeout-seconds 60
+```
+
+Release-preflight additions:
+
+```powershell
+python scripts\mcp_call_tool.py altium_project_health_check --timeout-seconds 60
+python scripts\mcp_call_tool.py altium_export_project_health_report --format json --filename project_health.json --timeout-seconds 60
+python scripts\mcp_call_tool.py altium_run_project_validation --confirm --timeout-seconds 120
+python scripts\mcp_call_tool.py altium_open_pcb_drc_dialog --confirm --timeout-seconds 60
+python scripts\mcp_call_tool.py altium_run_active_output_container --mode folder_structure --confirm --timeout-seconds 180
 ```
 
 ## 发布说明

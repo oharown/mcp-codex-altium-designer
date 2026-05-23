@@ -8,6 +8,7 @@ passes requests to an Altium DelphiScript bridge through JSON files.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import csv
 import datetime as _dt
 import json
@@ -30,7 +31,7 @@ HEARTBEAT_FILE = SHARED_DIR / "heartbeat.json"
 STOP_FILE = SHARED_DIR / "bridge.stop"
 
 SERVER_NAME = "codex-altium-bridge"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _framing = "line"
@@ -145,6 +146,12 @@ def send_bridge_command(command: str, args: dict[str, object], timeout_seconds: 
     )
     if last_decode_error:
         detail += f" Last response parse error: {last_decode_error}"
+    try:
+        pending_request = read_json(REQUEST_FILE) if REQUEST_FILE.exists() else None
+        if isinstance(pending_request, dict) and pending_request.get("id") == request_id:
+            remove_if_exists(REQUEST_FILE)
+    except Exception:
+        pass
     raise TimeoutError(detail + f" Bridge status: {json.dumps(status, ensure_ascii=False)}")
 
 
@@ -514,6 +521,123 @@ def prepare_output_generation_plan(timeout_seconds: float) -> dict[str, object]:
             "This MCP bridge does not automatically run production outputs yet; it first verifies which OutJob documents are present.",
             "Automatic production output generation should remain an explicit confirmed operation because it writes manufacturing files.",
         ],
+    }
+
+
+def confirmed_bridge_action_preview(
+    action: str,
+    command: str,
+    notes: list[str],
+) -> dict[str, object]:
+    return {
+        "confirmed": False,
+        "status": "needs_confirmation",
+        "action": action,
+        "bridge_command": command,
+        "notes": notes,
+    }
+
+
+def run_project_validation(confirm: bool, timeout_seconds: float) -> dict[str, object]:
+    notes = [
+        "Runs Altium project validation through WorkspaceManager:Compile with Action=Compile and ObjectKind=Project.",
+        "Validation findings are shown by Altium in the Messages panel; this bridge reports whether the command was dispatched.",
+        "The operation does not save the project automatically.",
+    ]
+    if not confirm:
+        return confirmed_bridge_action_preview("run_project_validation", "run_project_validation", notes)
+
+    response = send_bridge_command(
+        "run_project_validation",
+        {"timeout_seconds": timeout_seconds},
+        timeout_seconds,
+    )
+    if not response.get("ok", False):
+        raise RuntimeError(f"Altium returned an error while running project validation: {json.dumps(response, ensure_ascii=False)}")
+
+    result = response.get("result", {})
+    if isinstance(result, dict) and result.get("status") == "error":
+        raise RuntimeError(f"Altium bridge failed project validation dispatch: {json.dumps(result, ensure_ascii=False)}")
+    return {
+        "confirmed": True,
+        "status": "dispatched",
+        "action": "run_project_validation",
+        "result": result,
+        "notes": notes,
+    }
+
+
+def open_pcb_drc_dialog(confirm: bool, timeout_seconds: float) -> dict[str, object]:
+    notes = [
+        "Opens Altium's PCB Design Rule Checker dialog through PCB:DesignRuleCheck.",
+        "Batch DRC settings and report generation are controlled in the Altium dialog.",
+        "This bridge does not click the dialog's Run Design Rule Check button automatically.",
+    ]
+    if not confirm:
+        return confirmed_bridge_action_preview("open_pcb_drc_dialog", "open_pcb_drc_dialog", notes)
+
+    response = send_bridge_command(
+        "open_pcb_drc_dialog",
+        {"timeout_seconds": timeout_seconds},
+        timeout_seconds,
+    )
+    if not response.get("ok", False):
+        raise RuntimeError(f"Altium returned an error while opening PCB DRC dialog: {json.dumps(response, ensure_ascii=False)}")
+
+    result = response.get("result", {})
+    if isinstance(result, dict) and result.get("status") == "error":
+        raise RuntimeError(f"Altium bridge failed PCB DRC dialog dispatch: {json.dumps(result, ensure_ascii=False)}")
+    return {
+        "confirmed": True,
+        "status": "dispatched",
+        "action": "open_pcb_drc_dialog",
+        "result": result,
+        "notes": notes,
+    }
+
+
+def run_active_output_container(mode: str, confirm: bool, timeout_seconds: float) -> dict[str, object]:
+    normalized_mode = mode.strip().lower().replace("-", "_")
+    if normalized_mode in ("folder", "folder_structure", "files", "generate_report"):
+        normalized_mode = "folder_structure"
+    elif normalized_mode in ("pdf", "publish_pdf", "publish_to_pdf"):
+        normalized_mode = "pdf"
+    else:
+        raise ValueError("mode must be 'folder_structure' or 'pdf'")
+
+    notes = [
+        "Generates outputs for the currently selected output container in the active OutJob document.",
+        "Use mode='folder_structure' for a Folder Structure output container, or mode='pdf' for a PDF output container.",
+        "Review the active OutJob, selected container, enabled outputs, and output paths in Altium before confirming.",
+    ]
+    if not confirm:
+        return {
+            **confirmed_bridge_action_preview(
+                "run_active_output_container",
+                "run_active_output_container",
+                notes,
+            ),
+            "mode": normalized_mode,
+        }
+
+    response = send_bridge_command(
+        "run_active_output_container",
+        {"mode": normalized_mode, "timeout_seconds": timeout_seconds},
+        timeout_seconds,
+    )
+    if not response.get("ok", False):
+        raise RuntimeError(f"Altium returned an error while generating outputs: {json.dumps(response, ensure_ascii=False)}")
+
+    result = response.get("result", {})
+    if isinstance(result, dict) and result.get("status") == "error":
+        raise RuntimeError(f"Altium bridge failed output generation dispatch: {json.dumps(result, ensure_ascii=False)}")
+    return {
+        "confirmed": True,
+        "status": "dispatched",
+        "action": "run_active_output_container",
+        "mode": normalized_mode,
+        "result": result,
+        "notes": notes,
     }
 
 
@@ -1223,6 +1347,219 @@ def check_component_fields(
 
     document_type, components = read_components_for_source(normalized_source, timeout_seconds)
     return check_fields_for_components(document_type, components, fields)
+
+
+def report_status(report: object) -> str:
+    if not isinstance(report, dict):
+        return "error"
+    status = str(report.get("status", "")).strip().lower()
+    if status in ("ok", "ready"):
+        return "ok"
+    if status in ("needs_attention", "needs_outjob", "needs_confirmation"):
+        return "needs_attention"
+    if status:
+        return status
+    return "ok"
+
+
+def report_int(report: object, field: str) -> int:
+    if not isinstance(report, dict):
+        return 0
+    value = report.get(field, 0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def report_issue_count(report: object) -> int:
+    if not isinstance(report, dict):
+        return 1
+    if "issue_count" in report:
+        return report_int(report, "issue_count")
+    if report.get("status") == "needs_outjob":
+        return 1
+    unannotated = report.get("unannotated")
+    if isinstance(unannotated, list):
+        return len(unannotated)
+    return 0 if report_status(report) == "ok" else 1
+
+
+def health_step(name: str, label: str, runner: Callable[[], dict[str, object]]) -> dict[str, object]:
+    try:
+        report = runner()
+    except Exception as exc:
+        return {
+            "name": name,
+            "label": label,
+            "status": "error",
+            "issue_count": 1,
+            "review_count": 0,
+            "error": str(exc),
+        }
+
+    return {
+        "name": name,
+        "label": label,
+        "status": report_status(report),
+        "issue_count": report_issue_count(report),
+        "review_count": report_int(report, "review_count"),
+        "report": report,
+    }
+
+
+def project_health_check(
+    required_fields: object | None,
+    include_bom: bool,
+    include_output_jobs: bool,
+    timeout_seconds: float,
+) -> dict[str, object]:
+    fields = normalize_required_fields(required_fields)
+    steps = [
+        health_step(
+            "designators",
+            "Component designators",
+            lambda: check_component_designators("both", timeout_seconds),
+        ),
+        health_step(
+            "sch_pcb_comparison",
+            "Schematic vs PCB component comparison",
+            lambda: compare_sch_pcb_components(timeout_seconds),
+        ),
+        health_step(
+            "component_fields",
+            "Required component fields",
+            lambda: check_component_fields("both", fields, timeout_seconds),
+        ),
+        health_step(
+            "pcb_nets",
+            "PCB net sanity",
+            lambda: check_pcb_nets(timeout_seconds),
+        ),
+    ]
+
+    if include_bom:
+        steps.append(
+            health_step(
+                "schematic_bom",
+                "Schematic BOM preview",
+                lambda: generate_simple_bom("schematic", timeout_seconds),
+            )
+        )
+
+    if include_output_jobs:
+        steps.append(
+            health_step(
+                "output_jobs",
+                "OutJob readiness",
+                lambda: prepare_output_generation_plan(timeout_seconds),
+            )
+        )
+
+    error_count = sum(1 for step in steps if step.get("status") == "error")
+    issue_count = sum(report_int(step, "issue_count") for step in steps)
+    review_count = sum(report_int(step, "review_count") for step in steps)
+    if error_count:
+        overall_status = "error"
+    elif issue_count or review_count:
+        overall_status = "needs_attention"
+    else:
+        overall_status = "ok"
+
+    checks = {str(step["name"]): step for step in steps}
+    return {
+        "source": "project",
+        "status": overall_status,
+        "generated_at": utc_now(),
+        "summary": {
+            "check_count": len(steps),
+            "error_count": error_count,
+            "issue_count": issue_count,
+            "review_count": review_count,
+            "required_fields": fields,
+        },
+        "checks": checks,
+        "next_actions": [
+            "Run altium_run_project_validation with confirm=true to trigger Altium project validation/ERC.",
+            "Run altium_open_pcb_drc_dialog with confirm=true to open the PCB Design Rule Checker dialog.",
+            "Run altium_run_active_output_container with confirm=true after selecting the intended OutJob output container.",
+        ],
+        "notes": [
+            "This health check is read-only and reuses existing MCP checks.",
+            "Project validation, PCB DRC, and production output generation are separate confirmed actions because they change Altium UI state or write output files.",
+        ],
+    }
+
+
+def write_project_health_check_csv(path: Path, report: dict[str, object]) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["check", "label", "status", "issue_count", "review_count", "error", "detail"])
+
+        summary = report.get("summary", {})
+        writer.writerow(
+            [
+                "summary",
+                "Project health",
+                report.get("status", ""),
+                report_int(summary, "issue_count"),
+                report_int(summary, "review_count"),
+                "",
+                json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+            ]
+        )
+
+        checks = report.get("checks", {})
+        if isinstance(checks, dict):
+            for name, step in checks.items():
+                if not isinstance(step, dict):
+                    continue
+                detail = step.get("report", step.get("error", ""))
+                writer.writerow(
+                    [
+                        name,
+                        step.get("label", ""),
+                        step.get("status", ""),
+                        step.get("issue_count", ""),
+                        step.get("review_count", ""),
+                        step.get("error", ""),
+                        json.dumps(detail, ensure_ascii=False, separators=(",", ":")),
+                    ]
+                )
+    os.replace(tmp_path, path)
+
+
+def export_project_health_report(
+    required_fields: object | None,
+    include_bom: bool,
+    include_output_jobs: bool,
+    file_format: str,
+    filename: str | None,
+    timeout_seconds: float,
+) -> dict[str, object]:
+    normalized_format = file_format.strip().lower()
+    if normalized_format not in ("csv", "json"):
+        raise ValueError("format must be 'csv' or 'json'")
+
+    report = project_health_check(required_fields, include_bom, include_output_jobs, timeout_seconds)
+    ensure_exports_dir()
+    output_path = EXPORTS_DIR / report_filename("health_check", "project", normalized_format, filename)
+
+    if normalized_format == "json":
+        write_json_atomic(output_path, report)
+    else:
+        write_project_health_check_csv(output_path, report)
+
+    summary = report.get("summary", {})
+    return {
+        "ok": True,
+        "source": "project",
+        "format": normalized_format,
+        "path": str(output_path),
+        "status": report.get("status"),
+        "summary": summary,
+    }
 
 
 def export_filename(source: str, file_format: str, filename: str | None) -> str:
@@ -2111,6 +2448,144 @@ TOOLS: list[dict[str, object]] = [
         },
     },
     {
+        "name": "altium_project_health_check",
+        "description": "Run a read-only project health check across designators, SCH/PCB consistency, required fields, PCB nets, BOM preview, and OutJob readiness.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "required_fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Component fields or schematic parameter names that must be present and non-blank.",
+                    "default": ["footprint"],
+                },
+                "include_bom": {
+                    "type": "boolean",
+                    "description": "Include a read-only schematic BOM preview check.",
+                    "default": True,
+                },
+                "include_output_jobs": {
+                    "type": "boolean",
+                    "description": "Include an OutJob readiness check.",
+                    "default": True,
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": "How long to wait for each Altium bridge response.",
+                    "default": 60,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "altium_export_project_health_report",
+        "description": "Export the read-only project health check report to exports/ as CSV or JSON.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "required_fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Component fields or schematic parameter names that must be present and non-blank.",
+                    "default": ["footprint"],
+                },
+                "include_bom": {
+                    "type": "boolean",
+                    "description": "Include a read-only schematic BOM preview check.",
+                    "default": True,
+                },
+                "include_output_jobs": {
+                    "type": "boolean",
+                    "description": "Include an OutJob readiness check.",
+                    "default": True,
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["csv", "json"],
+                    "description": "Export file format.",
+                    "default": "csv",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Optional output filename. Directory components are ignored; file is always written under exports/.",
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": "How long to wait for each Altium bridge response.",
+                    "default": 60,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "altium_run_project_validation",
+        "description": "Trigger Altium project validation/ERC through WorkspaceManager:Compile. Requires confirm=true and does not save the project automatically.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true to dispatch project validation in Altium.",
+                    "default": False,
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": "How long to wait for the Altium bridge response.",
+                    "default": 60,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "altium_open_pcb_drc_dialog",
+        "description": "Open Altium's PCB Design Rule Checker dialog for the current PCB. Requires confirm=true; does not run the dialog automatically.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true to open the PCB DRC dialog in Altium.",
+                    "default": False,
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": "How long to wait for the Altium bridge response.",
+                    "default": 60,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "altium_run_active_output_container",
+        "description": "Generate outputs for the currently selected output container in the active OutJob. Requires confirm=true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["folder_structure", "pdf"],
+                    "description": "Output container mode selected in the active OutJob.",
+                    "default": "folder_structure",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true to generate production outputs from the active OutJob container.",
+                    "default": False,
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": "How long to wait for the Altium bridge response.",
+                    "default": 120,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "altium_list_pcb_components",
         "description": "List component designators/comments/footprints from the current PCB document in Altium.",
         "inputSchema": {
@@ -2671,6 +3146,63 @@ def call_tool(name: str, arguments: object | None) -> dict[str, object]:
         timeout_seconds = float(args.get("timeout_seconds", 60))
         try:
             return text_result(prepare_output_generation_plan(timeout_seconds))
+        except Exception as exc:
+            return text_result(str(exc), is_error=True)
+
+    if name == "altium_project_health_check":
+        timeout_seconds = float(args.get("timeout_seconds", 60))
+        required_fields = args.get("required_fields")
+        include_bom = argument_bool(args.get("include_bom"), True)
+        include_output_jobs = argument_bool(args.get("include_output_jobs"), True)
+        try:
+            return text_result(project_health_check(required_fields, include_bom, include_output_jobs, timeout_seconds))
+        except Exception as exc:
+            return text_result(str(exc), is_error=True)
+
+    if name == "altium_export_project_health_report":
+        timeout_seconds = float(args.get("timeout_seconds", 60))
+        required_fields = args.get("required_fields")
+        include_bom = argument_bool(args.get("include_bom"), True)
+        include_output_jobs = argument_bool(args.get("include_output_jobs"), True)
+        file_format = str(args.get("format", "csv"))
+        filename_arg = args.get("filename")
+        filename = str(filename_arg) if filename_arg is not None else None
+        try:
+            return text_result(
+                export_project_health_report(
+                    required_fields,
+                    include_bom,
+                    include_output_jobs,
+                    file_format,
+                    filename,
+                    timeout_seconds,
+                )
+            )
+        except Exception as exc:
+            return text_result(str(exc), is_error=True)
+
+    if name == "altium_run_project_validation":
+        timeout_seconds = float(args.get("timeout_seconds", 60))
+        confirm = argument_bool(args.get("confirm"), False)
+        try:
+            return text_result(run_project_validation(confirm, timeout_seconds))
+        except Exception as exc:
+            return text_result(str(exc), is_error=True)
+
+    if name == "altium_open_pcb_drc_dialog":
+        timeout_seconds = float(args.get("timeout_seconds", 60))
+        confirm = argument_bool(args.get("confirm"), False)
+        try:
+            return text_result(open_pcb_drc_dialog(confirm, timeout_seconds))
+        except Exception as exc:
+            return text_result(str(exc), is_error=True)
+
+    if name == "altium_run_active_output_container":
+        timeout_seconds = float(args.get("timeout_seconds", 120))
+        mode = str(args.get("mode", "folder_structure"))
+        confirm = argument_bool(args.get("confirm"), False)
+        try:
+            return text_result(run_active_output_container(mode, confirm, timeout_seconds))
         except Exception as exc:
             return text_result(str(exc), is_error=True)
 
