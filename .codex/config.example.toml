@@ -1,0 +1,7 @@
+[mcp_servers.altium]
+command = 'python'
+args = ['C:\path\to\mcp-codex-altium-designer\server.py']
+cwd = 'C:\path\to\mcp-codex-altium-designer'
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+default_tools_approval_mode = 'prompt'

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# MCP/Altium runtime state
+shared/*.json
+shared/*.tmp
+shared/bridge.stop
+shared/operations/
+
+# Generated reports and local design data
+exports/
+
+# Altium local backups/history
+bridge/History/
+*.~*
+
+# Local editor/OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
